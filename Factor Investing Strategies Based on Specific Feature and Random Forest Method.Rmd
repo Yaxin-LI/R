@@ -1,0 +1,451 @@
+---
+title: "Factor Investing Strategies Based on Specific Feature and Random Forest Method"
+author: "Yaxin LI"
+date: "2019.03.25"
+output: html_document
+---
+
+
+
+#1. Introduction
+In this report, my goal is build factor investing strategies based on a specific feature and random forest, and compare the performance of different strategies with the benchmark, which is the equal weighted portfolio will all the stocks.
+First of all, I prepare the whole dataset for further study. Here, a data analysis with descriptive statistics are given so as to help us get a full picture of the dataset. Then, I normalize the data so as to make it suitable for further use. And the autocorrelation are also analyzed here. Considering that compared with the high autocorrelation of predictors which are exactly eleven features of stocks, the future return have little autocorrelation, the variation of predictors are also used latter for building machine learning based strategies.
+Secondly, for the factor investing strategy based on a specific feature, a proper feature with a proper threshold should be chosen so as to build the portfolio. Thus, a grid research is carried on here to achieve the goal. Furthermore, to see if the portfolio is significant better compared with other portfolio, I carry on a deflated Sharpe ratio test in this study.
+Thirdly, I build two factor investing strategies based on random forest method. One is based on the predictors while the other is based on the deviation of predictors.
+Last but not least, the performance of the three strategies mentioned above is compared with the benchmark, and plenty of performance measures are used here to compare the performance. 
+
+
+
+#2. Data Preparation
+
+##2.1 Data Analysis
+This dataset consists of monthly financial data of 209 stocks from 1999-02-01 to 2008-08-31. Eleven features are provided in the dataset, which are market capitalization (Mkt_Cap), price to book ratio (P2B), Volume of 1 month (Vol_1M), dividend yield (Div_yield), PE ratio (PE_ratio), RSI index of 1 month (RSI_1M), debt to equity ratio (D2E), profit growth (Prof_growth), return difference of different caps (Ret_Cap), asset growth (Asset_growth) and profit margin (Prof_Marg).
+
+```{r}
+if(!require(tidyverse)){install.packages("tidyverse")}
+if(!require(e1071)){install.packages("e1071")}                        # The package for grid research and DSR test
+if(!require(tseries)){install.packages("tseries")}                    # The package for calculating maximum drawdown
+if(!require(rpart)){install.packages(c("rpart", "rpart.plot"))}       # The packages for trees
+if(!require(randomForest)){install.packages("randomForest")}          # The package for random forest
+library(tidyverse)
+library(e1071)
+library(tseries)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+load("data_full.RData")                        
+data <- data %>% arrange(Date,Tick)                 #make sure all are in order
+tick <- levels(data$Tick)                   
+data <- data  %>%   
+    group_by(Tick) %>%                             
+    mutate(F_Return = lead(Close) / Close - 1) %>%    
+    ungroup() %>%                                    
+    na.omit()    
+
+summary(data)                                       # Descriptive statistics
+head(data)
+
+```
+
+
+
+
+##2.2 Normalizing the Data
+
+```{r}
+# Data normalization
+normalize <-  function(data){
+    data <- data %>% as.matrix()
+    return(ecdf(data)(data))
+}
+data_n <- data %>%                       
+    group_by(Date) %>%                    
+    mutate_if(is.numeric,normalize) %>%    
+    ungroup() %>%                          
+    select(-Tick, -Date, -Close)         
+data_n$F_Return <- data$F_Return
+
+data_2 <- data.frame(data[,1:3],data_n)
+head(data_2)
+```
+
+
+```{r}
+# Have a look at the normalized data
+head(data_n)
+data_n %>% 
+    select(-F_Return) %>%                       # Remove returns
+    gather(key = Attribute, value = Value) %>% 
+    ggplot(aes(x = Value, fill = Attribute)) + 
+    geom_histogram() +                          # Plot histograms
+    facet_grid(Attribute~.)                     # Stack the histograms
+```
+
+
+
+
+##2.3 Autocorrelation of the Data
+
+```{r}
+# Calculate the first order autocorrelation coefficients
+acf_lag1 <- function(v){  
+    return(acf(v, lag.max = 1, plot = FALSE)$acf[2])#
+}
+data_2 %>% group_by(Tick) %>% summarise_if(is.numeric, acf_lag1)
+```
+
+
+```{r}
+# Get the deviations of features
+data_3 <- data_2  %>%   
+    group_by(Tick) %>%                          
+    mutate(Mkt_Cap_varia=Mkt_Cap-lag(Mkt_Cap),
+           P2B_varia=P2B-lag(P2B),
+           Vol_1M_varia=Vol_1M-lag(Vol_1M),
+           Div_yield_varia=Div_yield-lag(Div_yield),
+           PE_ratio_varia=PE_ratio-lag(PE_ratio),
+           RSI_1M_varia=RSI_1M-lag(RSI_1M),
+           D2E_varia=D2E-lag(D2E),
+           Prof_growth_varia=Prof_growth-lag(Prof_growth),
+           Ret_Cap_varia=Ret_Cap-lag(Ret_Cap),
+           Asset_growth_varia=Asset_growth-lag(Asset_growth),
+           Prof_Marg_varia=Prof_Marg-lag(Prof_Marg),
+    ) %>%   
+    ungroup() %>%                             
+    na.omit()    
+head(data_3[,c(1:2,16:26)])
+```
+
+
+```{r}
+# Check the autocorrelation of the deviation of features
+data_3 %>% group_by(Tick) %>% summarise_if(is.numeric, acf_lag1) 
+head(data_3[,c(1:2,16:26)])
+```
+
+
+
+
+#3. Strategies Based on a Specific Feature
+
+##3.1 Grid Research for the Eleven Features
+
+```{r}
+# Grid approach function
+strategy <- function(data, feature, thresh, direction){
+    data_tem <- select(data, feature, Date, F_Return)   
+    colnames(data_tem)[1] <- "feature"            
+    data_tem %>% 
+        mutate(decision = direction * feature > direction * thresh) %>%  # Investment decision
+        group_by(Date) %>%                                               # Date-by-date  analysis    
+        mutate(nb = sum(decision),                                       # Nb assets in portfolio
+               w = decision / nb,                                        # Equal weights
+               return = w * F_Return) %>%                        
+        summarise(p_return = sum(return)) %>%                            # Portfolio return
+        summarise(avg = mean(p_return,na.rm = TRUE), sd = sd(p_return,na.rm = TRUE), SR = avg/sd) %>% # Performance  metrics
+        return()
+}
+```
+
+```{r}
+
+# Get the parameters
+feature <- c("Mkt_Cap", "P2B", "Vol_1M","Div_yield","PE_ratio", "RSI_1M", "D2E","Prof_growth","Ret_Cap","Asset_growth","Prof_Marg")  
+thresh <- seq(0.2,0.8, by = 0.1)                                        # Threshold values
+direction <- c(1,-1)                                                    # Decision direction
+parameters <- expand.grid(feature, thresh, direction)                   
+feature <- parameters[,1] %>% as.character()                           
+thresh <- parameters[,2]                                          
+direction <- parameters[,3]                                         
+parameters
+
+
+# Find the best factor with the corresponding threshold
+grid <- pmap(list(feature, thresh, direction),                          # Three Parameters used in the grid search
+            strategy,                              
+            data = data_3                       
+) %>% 
+    unlist() %>%
+    matrix(ncol = 3, byrow = T)
+grid <- data.frame(feature, thresh, direction, grid)                    # Gather and reformat results 
+colnames(grid)[4:6] <- c("mean", "sd", "SR")                    
+grid
+grid <- grid %>% mutate_at(vars(direction), as.factor)                  # set direciton as factor so as to plot
+grid %>% ggplot(aes(x = thresh, y = SR, color = feature)) +  
+    geom_point() + geom_line() + facet_grid(direction~.) 
+
+
+```
+
+
+
+
+##3.2 Deflated Sharpe Ratio Test
+
+```{r DSR_test}
+# Define DSR_test function
+DSR_test <- function(SR, Tt, M, g3, g4, SR_m, SR_v){
+    gamma <- -digamma(1)                                                              # Euler-Mascheroni constant
+    SR_star <- SR_m + sqrt(SR_v)*((1-gamma)*qnorm(1-1/M) + gamma*qnorm(1-1/M/exp(1))) # Average maximum Sharpe ratio
+    num <- (SR-SR_star) * sqrt(Tt-1)                                                  # Numerator
+    den <- sqrt(1 - g3*SR + (g4-1)/4*SR^2)                                            # Denominator
+    return(pnorm(num/den))
+}
+
+
+# Set all the parameters
+M <- nrow(parameters)        # Number of strategies we tested: 11*7*2=154
+SR <- max(grid$SR)           # The Sharpe ratio we want to test
+SR_m <- mean(grid$SR)        # Average Sharpe ratio among all strategies
+SR_v <- var(grid$SR)         # variance of Sharpe ratio among all strategies
+
+
+# Carry on DSR test for Prof_growth
+data_tem <- select(data_3, "Prof_growth", Date, F_Return) # Prof_growth is the retained feature
+colnames(data_tem)[1] <- "feature"
+returns <-  data_tem %>% 
+        mutate(decision = feature > 0.8) %>%              # 0.8 is the best threshold
+        group_by(Date) %>%              
+        mutate(nb = sum(decision),      
+               w = decision / nb,        
+               return = w * F_Return) %>%                 # Equally weighted
+        summarise(p_return = sum(return))                 # Portfolio return
+g3 <- skewness(returns$p_return)                          # Function from the e1071 package
+g4 <- kurtosis(returns$p_return) + 3                      # Function from the e1071 package
+Tt <- nrow(returns)                                       # Number of dates
+DSR_test(SR, Tt, M, g3, g4, SR_m, SR_v)                   # The t value
+```
+
+
+
+
+#4. Factor Investing Strategies Based on Random Forest Model
+
+##4.1 Presentation of Simple Tree Model
+
+```{r}
+
+feature <- c("Mkt_Cap", "P2B", "Vol_1M","Div_yield","PE_ratio", "RSI_1M", "D2E","Prof_growth","Ret_Cap","Asset_growth","Prof_Marg")
+
+fit <- data_3[,c(1:15)] %>%                      
+    select(-Tick, -Date, -Close) %>%
+    rpart(F_Return~.,                 # Model: F_Return as a function of all the features
+          cp = 0.001,                 # Complexity: lower means more nodes/levels
+          maxdepth = 3,              
+          data = .)                  
+rpart.plot(fit)                      
+
+fit2 <- data_3[,c(1:15)] %>%                     
+    select(-Tick, -Date, -Close) %>%  
+    rpart(F_Return~.,                
+          cp = 0.001,                
+          maxdepth = 4,              
+          data = .)                  
+rpart.plot(fit2)   
+```
+
+
+
+
+##4.2 Strategies Based on Random Forest Model
+
+```{r}
+# Define future return as ordinal data
+
+r_thresh <- 0.02                                                                      # Return threshold
+data_3$FC_Return <-data_3$F_Return                                                    # Duplicate return
+data_3$FC_Return[data_3$F_Return <= (-r_thresh)] <- 0                                 # Low return
+data_3$FC_Return[(data_3$F_Return > (-r_thresh)) & (data_3$F_Return < r_thresh)] <- 1 # Normal return
+data_3$FC_Return[data_3$F_Return >= r_thresh] <- 2                                    # High return
+
+
+```
+
+
+
+
+
+#5. Performance Comparison among All the Strategies
+
+##5.1 Cumulative Return and Maximum Drawdown
+
+```{r}
+# Define the 4 portfolios
+Tt <- data_3$Date %>% 
+    unique() %>%
+    as.Date(origin = "1970-01-01")
+nb_time <- length(Tt)-1                                              # Number of dates
+nb_port <- 4                                                         # Number of portfolios
+port_weights <- array(0, dim = c(nb_time, nb_port, length(tick)))    # Initialize the portfolio weights
+port_returns <- matrix(0, nrow = nb_time, ncol = nb_port)            # Initialize the portfolio returns
+
+```
+
+
+```{r, warning = FALSE, message = FALSE}
+# Define weight function
+weights_multi <- function(data_tem,j){    
+N <- data_3$Tick %>% levels() %>% length() 
+feature <- c("Mkt_Cap", "P2B", "Vol_1M","Div_yield","PE_ratio", "RSI_1M", "D2E","Prof_growth","Ret_Cap","Asset_growth","Prof_Marg")
+if(j == 1){return(rep(1/N,N))}                                          # Equally weighted portfolio: the benchmark
+
+
+if(j == 2){                                                             # Portfolio with large Prof_growth
+  data_tem1 <- data_tem %>% filter(Date==data_tem$Date[dim(data_tem)[1]])
+  return((data_tem1$Prof_growth> 0.8)/sum(data_tem1$Prof_growth > 0.8))} 
+
+
+if(j == 3){                                                             # Portfolio based on RF with features
+    train_data <- data_tem[,c(1:14,27)] %>% 
+            filter(Date < data_tem$Date[dim(data_tem)[1]])
+    test_data  <- data_tem[,c(1:14,27)] %>% filter(Date ==data_tem$Date[dim(data_tem)[1]])  
+
+    
+    fit <- train_data %>%         
+    select(-Tick, -Date, -Close) %>%  
+    randomForest(FC_Return~.,    
+                 data = .,      
+                 ntree = 10,                         # Number of random trees
+                 mtry = 7                            # Number of predictive variables used for each tree
+    )
+    pred <- predict(fit, test_data)                  # Predict for the next period
+    return((pred>quantile(pred, 1-30/209))/30)       # Stocks with 30 largest values, equally-weighted
+    
+      }
+   
+   
+if(j == 4){                                                             # Portfolio based on RF with deviation of features
+    train_data <- data_tem[,c(1:2,16:27)] %>% 
+            filter(Date < data_tem$Date[dim(data_tem)[1]])
+    test_data  <- data_tem[,c(1:2,16:27)] %>% filter(Date ==data_tem$Date[dim(data_tem)[1]]) 
+
+    fit <- train_data %>%               
+    select(-Tick, -Date) %>%     
+    randomForest(FC_Return~.,      
+                 data = .,        
+                 ntree = 10,      
+                 mtry = 7     
+    )
+    pred <- predict(fit, test_data) 
+    return((pred>quantile(pred, 1-30/209))/30)      
+
+    }
+
+
+}
+
+
+#Get the weights and returns of the 4 portfolios
+  for(t in 100:nb_time){                             # Stop before the last date
+    if(t%%12==0){print(Tt[t])}                       # Show the process
+    data_tem <-c()
+    data_tem <- data_3 %>% 
+            filter(Date<=Tt[t])
+    realized_returns <- data %>%                   
+            filter(Date ==  Tt[t]) %>%           
+            select(F_Return)                       
+    for(j in 1:nb_port){                                     
+        port_weights[t,j,] <- weights_multi(data_tem, j) 
+        port_returns[t,j]  <- sum(port_weights[t,j,] * realized_returns)
+    }
+    
+  }
+
+
+port_weightsf <- c()
+port_returnsf <- c()
+port_weightsf <- port_weights[100:229,,]
+port_returnsf <- port_returns[100:229,]
+head(port_returnsf)
+
+```
+
+
+```{r}
+#Compare the cumulative returns
+Date <- Tt[100:nb_time]
+cum_return <- apply(port_returnsf+1,2,cumprod)
+cum_returnf <- data.frame(Date,cum_return)
+colnames(cum_returnf)<- (c("Date",1:dim(port_returnsf)[2]))
+cum_returnf <- gather(cum_returnf, key = Strategies, value = Value, -Date)
+cum_returnf$Strategies <- as.factor(cum_returnf$Strategies)
+
+cum_returnf %>% ggplot(aes(x = Date, y = Value, color = Strategies)) + 
+  geom_line()+labs( x = 'Date', y = 'Cumulative Values')
+
+```
+
+
+```{r}
+# Visualize the cummulative return and the maximum drawdown
+    Date <- Tt[100:nb_time]
+    MDD <- c()
+    for (i in 1:dim(port_returnsf)[2]){
+    cum_return <- c()
+    Max_drawdown <- c()
+    g <- c()
+    cum_return <- cumprod(port_returnsf[,i]+1)
+    Max_drawdown <- maxdrawdown(cum_return)
+    g <- ggplot(data=data.frame(Date, cum_return),aes(x = Date, y = cum_return)) + geom_line(col="blue")+   geom_point(aes(Date[Max_drawdown$from],cum_return[Max_drawdown$from]),col="red",size=3)+ geom_point(aes(Date[Max_drawdown$to],cum_return[Max_drawdown$to]),col="red",size=3)+ggtitle("Cumulative return")+theme(plot.title = element_text(hjust = 0.5)) 
+    dev.new()
+    print(g)  
+    print(paste("Max drawdown is",Max_drawdown$maxdrawdown))
+    MDD[i] <- as.numeric(Max_drawdown$maxdrawdown)
+    }
+
+```
+
+
+
+
+##5.2 Quantitative Performance Measures
+
+```{r perf_met}
+# Define the returns of the real asset
+asset_returns <- data_3[(99*dim(port_weights)[3]):(229*dim(port_weights)[3]),c(2,15)]
+
+
+# Define the performance matrics function
+perf_met <- function(port_returnsf, port_weightsf, asset_returns){
+    avg_ret <- apply(port_returnsf,2,mean,na.rm=T)*12
+    vol <- apply(port_returnsf,2,sd,na.rm=T)*sqrt(12)            
+    Sharpe_ratio <- avg_ret / vol                               
+    VaR_95 <-  apply(port_returnsf,2,quantile,0.05)*12
+    
+    # Turnover rate   
+    turn<-array(0, dim =c(1,dim(port_weightsf)[2]))      
+    realised_returns<-array(0, dim = c(1, 1, dim(port_weightsf)[3]))
+    prior_weights<-array(0, dim =dim(port_weightsf))
+    for(j in 1:dim(port_weightsf)[2]){
+      for(tt in 101:229){
+        realised_returns[1,1,]<- t(asset_returns %>% filter(Date == Tt[t]) %>% select(-Date))
+        prior_weights[t-100,j,] <- port_weights[t-100,j,] * (1 + realised_returns[1,1,])
+        turn[1,j] <- turn[1,j] + sum(abs(port_weights[t-99,j,] - prior_weights[t-100,j,]/sum(prior_weights[t-100,j,])))
+    }  
+      
+    }
+   
+    turn <- as.numeric(turn/(nb_time))*12                        
+    Sharpe_ratio_adj <- (avg_ret-0.02*turn)/vol
+    met <- data.frame(avg_ret, vol, Sharpe_ratio, VaR_95, turn,Sharpe_ratio_adj)    # Aggregation of all the measures
+    colnames(met)<- (c("average return", "vol", "Sharpe ratio", "VaR95%","Turnover","Turnover-adjusted Sharpe ratio"))
+    rownames(met) <-(c("EW", "Prof_growth","Random Forest","Random Forest with deviation"))
+    return(met)
+}
+
+perf_met(port_returnsf, port_weightsf, asset_returns)  # Get perf metrics
+
+```
+
+
+```{r}
+# Calculate MAR ratio
+avg_ret <- apply(port_returnsf,2,mean,na.rm=T)*12
+MAR <- avg_ret/MDD
+for (i in 1:nb_port){
+ print(paste("The MAR ratio is",MAR[i])) 
+}
+
+```
+
+

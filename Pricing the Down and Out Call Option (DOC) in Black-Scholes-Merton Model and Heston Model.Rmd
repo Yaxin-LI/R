@@ -1,0 +1,590 @@
+---
+title: "Pricing the Down and Out Call Option (DOC) in Black-Scholes-Merton Model and Heston Model"
+author: "Yaxin LI"
+date: "2019.02.09"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+##2. Black-Scholes-Merton Model
+###2.2 Pricing DOC
+####2.2.1 Analytical Method
+```{r}
+library(tidyverse)
+S     <- 50         # Initial stock value
+sigma <- 0.2        # Volatility
+r     <- 0.02       # Risk-free rate
+t     <- 1          # Maturity
+K     <-40          #strike
+B     <-35          #barrier
+
+#Get the fomula for vanilla call option
+call_BS <- function(S, K, r, sigma, t) {
+  d1 <- (log(S/K) + (r + sigma^2 / 2) * t) / sigma / sqrt(t)
+  d2 <- d1 - sigma * sqrt(t)
+  return(S * pnorm(d1) - K * exp(-r*t) * pnorm(d2))
+}
+
+#Get the Pricing fomula for DOC
+DOC_price_BS <-function(S, K, B, r, sigma, t){
+  return(max(call_BS(S, K, r, sigma, t)-(S/B)^(1-2*r/(sigma^2))*call_BS(B^2/S, K, r, sigma, t),0))
+}
+
+#Get the theoretical value for DOC
+theoretical=DOC_price_BS(S, K, B, r, sigma, t)
+
+```
+
+
+####2.2.2 Monte-Carlo Method
+#####3. Simulation
+```{r}
+nb_sim    <- 10^4      # Number of Monte-Carlo simulations
+nb_points <- 10^2      # Number of discretization points
+payoff    <- c()       # Empty vector of simulated payoffs
+
+#Simulation
+for(j in 1:nb_sim){
+  x<-c(0)
+  x <- S         # Initializing the process
+  if (x<= B){
+  tem=0
+  break
+  }
+  for(k in 2:nb_points){
+    x[k] <- x[k-1] * (1 + r*t/nb_points + sigma*sqrt(t/nb_points) *rnorm(1)) 
+    if (x[k] <=  B){
+    tem=0
+    break
+    }
+    tem=x[k]   
+  }
+
+  payoff[j] <- max(0,tem-K)
+}
+
+#Get the MC value for DOC
+MC=exp(-r*t)*mean(payoff)
+```
+
+
+#####4. Visualize the simulation process
+```{r}
+library(MASS)
+nb_sim <- 10        # Number of Monte-Carlo simulations
+nb_points <- 10^2   # Number of discretization points
+S <- 50             # Initial stock value
+sigma <- 0.2        # Volatility
+r <- 0.02           # Risk-free rate
+t <- 1              # Maturity
+payoff <- c()       # Empty vector of simulated payoffs
+K <-40              #strike
+B <-35              #strike
+
+#Generate 10 sample paths
+x<-rep(0,(nb_points*nb_sim))
+dim(x)<-c(nb_points,nb_sim)
+
+for(j in 1:nb_sim){
+  x[1,j]<- S         # Initializing the process
+  
+  for(k in 2:nb_points){
+    x[k,j] <- x[k-1,j] * (1 + r*t/nb_points + sigma*sqrt(t/nb_points) *rnorm(1)) 
+  }
+}
+
+
+#plot sample paths
+label="B=35"
+sim <- data.frame(cbind(1:nb_points, x))
+colnames(sim) <- c("Iteration", 1:nb_sim)
+sim <- gather(sim, key = Simulation, value = Value, -Iteration)
+sim$Simulation <- as.factor(sim$Simulation)
+sim %>% ggplot(aes(x = Iteration, y = Value, color = Simulation)) + 
+  geom_line() + theme(text = element_text(size = 13))+geom_hline(aes(yintercept=35),color ="red",linetype="dashed",size=1)+geom_hline(aes(yintercept=40),linetype="dashed",size=1)
+
+
+```
+
+
+
+####2.2.3 Monte-Carlo Method with Refined Barriers
+```{r}
+payoff <- c()       # Empty vector of simulated payoffs
+
+#Simulation
+for(j in 1:nb_sim){
+  x<-c(0)
+  x <- S         # Initializing the process
+  if (x <=  B*exp(-0.5826*sigma*sqrt(1/nb_points))){
+  tem=0
+  break
+  }  
+  for(k in 2:nb_points){
+    x[k] <- x[k-1] * (1 + r*t/nb_points + sigma*sqrt(t/nb_points) *rnorm(1)) #类似几何收益率的做法.
+    if (x[k] <=  B*exp(-0.5826*sigma*sqrt(1/nb_points))){
+    tem=0
+    break
+    }
+    tem=x[k]   
+  }
+
+  
+  payoff[j] <- max(0,tem-K)
+}
+
+#Get the refined MC value for DOC
+MC_r=exp(-r*t)*mean(payoff)
+
+```
+
+
+####2.2.4 Fourier Transform and Laplace Transform Method
+```{r}
+#Wiener-Hopf Fourier Inversion
+if(!require(invLT)){install.packages("invLT")}
+library(invLT)  # Package for the Laplace inversion
+k <- log(K/S)
+b <- log(B/S)
+d <- r - sigma^2/2
+alpha <- 0.01   # Exponential tempering
+beta <- 0.01    # Exponential tempering
+
+
+#Definitions of Functions
+phi_p <- function(x, a, sigma, q){ # Wiener-Hopf factor phy_plus
+  i <- complex(real = 0, imag = 1)
+  l1 <- a/sigma^2 + sqrt(a^2+2*sigma^2*q)/sigma^2
+  l1/(l1+i*x)
+}
+
+phi_m <- function(x, a, sigma, q){ # Wiener-Hopf factor  phy_minus
+  i <- complex(real = 0, imag = 1)
+  l2 <- (-a/sigma^2) + sqrt(a^2+2*sigma^2*q)/sigma^2
+  l2/(l2-i*x)
+}
+
+integrand <- function(u, v, a, sigma, q, k, b, alpha, beta){ # CF of option price
+  i <- complex(real = 0, imag = 1)
+  num <- (exp(-i*u*k - i*v*b) * phi_p(u+v+i*(beta-alpha-1), a, sigma, q) * phi_m(u-i*(alpha+1), a, sigma, q))
+  den <-  (i*u + alpha) * (i*v - beta) * (i*u + alpha + 1) * q
+  return(num/den)
+}
+
+WH <- function(q, a, sigma, k, b, alpha, beta){ #laplace transform
+  nu <- 0.01                                             # Hardcoding the parameters for simplicity
+  v <- seq(-10, 10, by = nu)                          # Grid
+  u <- seq(-10, 10, by = nu)
+  z <- sapply(u, integrand, v = v, a = a, sigma = sigma, q = q, k = k, b = b, alpha = alpha, beta = beta) 
+  # The columns pertain to u, the rows to v
+  z <- Re(z[is.finite(z)])                                                    
+  return(1 / (2*pi)^2 * sum( z, na.rm = T) * nu^2)      # First inversion: double Fourier!  
+}
+
+test <- function(x) sapply(x, function(y) {WH(y, d, sigma, k, b, alpha, beta)})
+
+
+#Get the FT value for DOC
+FT=S * exp(-alpha*k+beta*b-r*t) * iv.BrC(test, t = 1, nterms = 19, gamma = 0.02)
+
+```
+
+
+###2.2.5 Robust Analysis for the price of DOC
+####2.2.5.1 Summary of the above four pricing methods
+```{r}
+#OUTPUT
+print(paste("Analytical Method:",theoretical))
+print(paste("Monte-Carlo Method:",MC))
+print(paste("Monte-Carlo Method with Refined Barriers:",MC_r))
+print(paste("Fourier Transform and Laplace Transform Method:",FT))
+
+```
+
+
+####2.2.5.2 Robust Analysis for the price of DOC
+Here, I change the parameters so as to see how the price of DOC evolves with price of the underlying stock, the barrier, the volatility, and the risk free rate respectively.
+```{r}
+#Price variation with initial stock prices
+S_test=20:70
+price=sapply(S_test,DOC_price_BS,K=K, B=B, r=r, sigma=sigma, t=t)
+price_test <- data.frame(S_test, price, "Price")
+ggplot(price_test, aes(x = S_test, y = price)) + geom_line(color='red')
+
+#Price variation with Barrier
+barrier_test=30+(1:50)/5
+price=sapply(barrier_test,DOC_price_BS,S=S,K=K, r=r,sigma=sigma, t=t)
+price_test <- data.frame(barrier_test, price, "Price")
+ggplot(price_test, aes(x =barrier_test, y = price)) + geom_line(color='red')
+
+#Price variation with volatility
+sigma_test=0.1+(1:50)/100
+price=sapply(sigma_test,DOC_price_BS,S=S,K=K, B=B, r=r, t=t)
+price_test <- data.frame(sigma_test, price, "Price")
+ggplot(price_test, aes(x =sigma_test, y = price)) + geom_line(color='red')
+
+#Price variation with risk free rate
+r_test=(1:50)/1000
+price=sapply(r_test,DOC_price_BS,S=S,K=K, B=B,sigma=sigma, t=t)
+price_test <- data.frame(r_test, price, "Price")
+ggplot(price_test, aes(x =r_test, y = price)) + geom_line(color='red')
+
+
+```
+
+
+##2.3 Greeks
+###2.3.1 Computing Greeks
+Here, I compute all the Greeks: Delta, Gamma, Vega, Theta, Pho for the special case. Since the closed form of Greeks for DOC are very complicated, here, I use numerical approximation method to compute the Greeks.
+The main idea of this numerical method is that, assuming smoothness and using the center differentiation.
+
+```{r}
+
+h <- 0.0001#simulate delta
+
+#Calculate all the Greeks
+Delta=(DOC_price_BS(S+h, K, B, r, sigma, t)-DOC_price_BS(S-h, K, B, r, sigma, t))/2/h
+Gamma=(DOC_price_BS(S+h, K, B, r, sigma, t)+DOC_price_BS(S-h, K, B, r, sigma, t)-2*DOC_price_BS(S, K, B, r, sigma, t))/2/(h^2)
+Vega=(DOC_price_BS(S, K, B, r, sigma+h, t)-DOC_price_BS(S, K, B, r, sigma-h, t))/2/h
+Theta=(DOC_price_BS(S, K, B, r, sigma, t)-DOC_price_BS(S, K, B, r, sigma, t-h))/h
+Pho=mean(DOC_price_BS(S, K, B, r+h, sigma, t)-DOC_price_BS(S, K, B, r-h, sigma, t))/2/h
+
+#Output
+print(paste("Delta: ",Delta))
+print(paste("Gamma:",Gamma))
+print(paste("Vega:",Vega))
+print(paste("Theta:",Theta))
+print(paste("Pho:",Pho))
+
+```
+
+###2.3.2 Robust Analysis for Delta
+To carry on the robust analysis for Delta, here I let the initial stock price vary from 20 to 70. In addition, I use four time to maturities, which is 3 months, 6 months, 9 months and 1 year to draw the following 4 curves respectively, so as to see the impact of time to maturity on Delta as well.
+
+```{r}
+#Test Delta variation with initial stock prices
+Delta_price <- function(S,t){
+h <- 0.0001#simulate delta
+  return((DOC_price_BS(S+h, K, B, r, sigma, t)-DOC_price_BS(S-h, K, B, r, sigma, t))/2/h)
+}
+
+#Generate 4 curves for 4 time to maturity
+t_test=c(0.25,0.6,0.75,1)
+Delta_test1=sapply(S_test,Delta_price,t=t_test[1])
+Delta_test2=sapply(S_test,Delta_price,t=t_test[2])
+Delta_test3=sapply(S_test,Delta_price,t=t_test[3])
+Delta_test4=sapply(S_test,Delta_price,t=t_test[4])
+Delta_test=cbind(Delta_test1,Delta_test2,Delta_test3,Delta_test4)
+
+#Plot
+test_greek <- data.frame(S_test, Delta_test)
+colnames(test_greek) <- c("Stock_price", (1:4)/4)
+test_greek<-gather(test_greek, key =Time_to_maturity, value = Value, -Stock_price)
+test_greek$Time_to_maturity<- as.factor(test_greek$Time_to_maturity)
+test_greek %>% ggplot(aes(x = Stock_price, y = Value, color = Time_to_maturity)) + 
+  geom_line() + theme(text = element_text(size = 13))
+
+
+```
+
+
+#3. Heston Model
+##3.1 Model Presentation
+In 1993, considering the phenomenon of volatility clustering, Heston introduced a model in which the variance is modelled by a Cox-Ingersoll-Ross (CIR) process (Heston, S. ,1993), and the dynamics of stochastic volatility and stock price can be write as follows: 
+$$dv_t=(a-bv_t)dt+c\sqrt{v_t}dZ_t^1$$
+The diffusion is then simply written as 
+$$\frac{dS_t}{S_t}=mdt + \sqrt{v_t}dZ_t^2$$
+Where $Z_t^1$ and $Z_t^2$ are two standard Q Brownian motions with a correlation coefficient ρ; a, b, c and m have to be positive to make sure that the model is well defined. 
+
+
+##3.2 Pricing DOC
+###3.2.1 Monte-Carlo Method
+#####3. Simulation
+```{r}
+#Simulation
+library(MASS)
+S <- 50             # Initial stock value
+sigma <- 0.2        # Volatility
+r <- 0.02           # Risk-free rate
+t <- 1              # Maturity
+K <-40 #strike
+B <-35 #strike
+pho <- -0.7
+
+#Define functions
+DOC_price_Hes<-function(S,K,B,r,sigma,t,pho){
+nb_sim    <- 5000     # Number of Monte-Carlo simulations
+nb_points <- 10^2      # Number of discretization points
+payoff    <- c()       # Empty vector of simulated payoffs
+a         <- 0.2
+b         <- 0.2
+c         <- 0.2
+SIGMA <-rbind(c(1,pho),c(pho,1))
+for(j in 1:nb_sim){
+  x <- c(0)
+  x <- S         # Initializing the process
+  v <- sigma
+  if (x<= B){
+  payoff=0
+  break
+  }
+    for(k in 2:nb_points){
+      gauss<-mvrnorm(1,mu=c(0,0),Sigma=SIGMA)
+      v[k] <- v[k-1]+(a-b*v[k-1])*t/nb_points+c*sqrt(v[k-1] * t/nb_points)* gauss[1]
+      x[k] <- x[k-1] * (1 + r*t/nb_points + sqrt(v[k] * t/nb_points) *gauss[2]) #类似几何收益率的做法.
+      tem=x[k] 
+      
+      if (x[k] <= B){
+      tem=0
+      break
+      }
+    }
+  payoff[j] <- max(0,tem-K)
+}
+
+return(exp(-r*t)*mean(payoff))
+}
+
+#Get the price of DOC in Hestion model
+Price_Hes=DOC_price_Hes(S,K,B,r,sigma,t,pho)
+print(paste("Price of DOC in Hestion model: ", Price_Hes))
+
+```
+
+
+
+#####4. Visualize the simulation process
+```{r}
+nb_sim    <- 10    
+nb_points <- 10^2 
+a         <- 0.2
+b         <- 0.2
+c         <- 0.2
+SIGMA     <- rbind(c(1,pho),c(pho,1))
+x         <- rep(0,(nb_points*nb_sim))
+dim(x)    <- c(nb_points,nb_sim)
+v         <- rep(0,(nb_points*nb_sim))
+dim(v)    <- c(nb_points,nb_sim)
+
+#Generate 10 sample paths
+for(j in 1:nb_sim){
+  x[1,j]<- S         # Initializing the process
+  v[1,j]<- sigma
+  for(k in 2:nb_points){
+    gauss<-mvrnorm(1,mu=c(0,0),Sigma=SIGMA)
+    v[k,j] <- v[k-1,j]+(a-b*v[k-1])*t/nb_points+c*sqrt(v[k-1,j] * t/nb_points)* gauss[1]
+    x[k,j] <- x[k-1,j] * (1 + r*t/nb_points + sqrt(v[k-1,j] * t/nb_points) *gauss[2]) #类似几何收益率的做法.
+  }
+}
+
+#plot sample paths
+sim <- data.frame(cbind(1:nb_points, x))
+colnames(sim) <- c("Iteration", 1:nb_sim)
+sim <- gather(sim, key = Simulation, value = Value, -Iteration)
+sim$Simulation <- as.factor(sim$Simulation)
+sim %>% ggplot(aes(x = Iteration, y = Value, color = Simulation)) + 
+  geom_line() + theme(text = element_text(size = 13))+geom_hline(aes(yintercept=35),color ="red",linetype="dashed",size=1)+geom_hline(aes(yintercept=40),linetype="dashed",size=1)
+
+#plot stock & vol together
+Date <- (1:nb_points) / nb_points * t
+x1<-x[,1]
+Simul <- data.frame(Date, x1, "Stock")
+colnames(Simul) <- c("Date", "Value", "Type")
+Simul_vol <- data.frame(Date, v[,1], "Vol")
+colnames(Simul_vol) <- c("Date", "Value", "Type")
+Visu <- rbind(Simul, Simul_vol)
+ggplot(Visu, aes(x = Date, y = Value)) + geom_line() + facet_grid(Type ~., scales = "free") +
+      scale_x_continuous(minor_breaks = seq(0, 1, length = nb_points+1))
+
+```
+
+### 3.2.2 Robust Analysis for the price of DOC
+Then, I will carry on the robust analysis in order to see how the Price of DOC will evolve with the price of the underlying stock, the barrier, the correlation coefficient, and the risk free rate respectively.
+
+```{r}
+#Price variation with initial stock prices
+S_test=20:70
+price<-c(0)
+price=sapply(S_test,DOC_price_Hes,K=K, B=B, r=r, sigma=sigma, t=t,pho=pho)
+price_test <- data.frame(S_test, price, "Price")
+ggplot(price_test, aes(x = S_test, y = price)) + geom_line(color='red')
+
+#Price variation with barrier
+barrier_test=30+(1:50)/5
+price<-c(0)
+price=sapply(barrier_test,DOC_price_Hes,S=S,K=K,r=r, sigma=sigma, t=t,pho=pho)
+price_test <- data.frame(barrier_test, price, "Price")
+ggplot(price_test, aes(x = barrier_test, y = price)) + geom_line(color='red')
+
+#Price variation with risk free rate
+r_test=(1:50)/1000
+price<-c(0)
+price=sapply(r_test,DOC_price_Hes,S=S,K=K, B=B, sigma=sigma, t=t,pho=pho)
+price_test <- data.frame(r_test, price, "Price")
+ggplot(price_test, aes(x =r_test, y = price)) + geom_line(color='red')
+
+#Price variation with correlation coefficient
+pho_test=-(1:50)/50
+price<-c(0)
+price=sapply(pho_test,DOC_price_Hes,S=S,K=K, B=B, r=r,sigma=sigma, t=t)
+price_test <- data.frame(pho_test, price, "Price")
+ggplot(price_test, aes(x =pho_test, y = price)) + geom_line(color='red')
+
+```
+
+
+##3.3 Greeks
+###3.3.1 Computing Greeks
+The Greeks: Delta, Gamma, Vega, Theta, Pho) are also computed using the method mentioned in 2.3.1, and the results are as follows. h=0.001 are used here.
+```{r}
+#Definition of the function
+DOC_price_Hes_G<-function(S,K,B,r,sigma,t,pho){
+nb_sim    <- 100     # Number of Monte-Carlo simulations
+nb_points <- 10      # Number of discretization points
+payoff    <- c()       # Empty vector of simulated payoffs
+a         <- 0.2
+b         <- 0.2
+c         <- 0.2
+SIGMA <-rbind(c(1,pho),c(pho,1))
+for(j in 1:nb_sim){
+  x <- c(0)
+  x <- S         # Initializing the process
+  v <- sigma
+  if (x<= B){
+  payoff=0
+  break
+  }
+    for(k in 2:nb_points){
+      gauss<-mvrnorm(1,mu=c(0,0),Sigma=SIGMA)
+      v[k] <- v[k-1]+(a-b*v[k-1])*t/nb_points+c*sqrt(v[k-1] * t/nb_points)* gauss[1]
+      x[k] <- x[k-1] * (1 + r*t/nb_points + sqrt(v[k] * t/nb_points) *gauss[2]) #类似几何收益率的做法.
+      tem=x[k] 
+      
+      if (x[k] <= B){
+      tem=0
+      break
+      }
+    }
+  payoff[j] <- max(0,tem-K)
+}
+
+return(exp(-r*t)*mean(payoff))
+}
+
+
+Delta_price_Hes <- function(S,t){
+               h<-0.1
+          nb_sim<-500
+          Delta <- c()  
+          for(j in 1:nb_sim){
+          Delta[j] <- DOC_price_Hes_G(S+h, K, B, r, sigma, t,pho)-DOC_price_Hes_G(S-h, K, B, r, sigma, t,pho)#center
+}
+  return(mean(Delta)/2/h)
+}
+
+
+Gamma_price_Hes <- function(S){
+               h<-0.1
+          nb_sim<-500
+          Gamma <- c()  
+          for(j in 1:nb_sim){
+          Gamma[j] <- DOC_price_Hes_G(S+h, K, B, r, sigma, t,pho)+DOC_price_Hes_G(S-h, K, B, r, sigma, t,pho)-2*DOC_price_Hes_G(S-h, K, B, r, sigma, t,pho)#center
+}
+  return(mean(Gamma)/2/h^2)
+}
+
+
+Vega_price_Hes <- function(S){
+               h<-0.001
+          nb_sim<-500
+          Vega <- c()  
+          for(j in 1:nb_sim){
+          Vega[j] <- DOC_price_Hes_G(S, K, B, r, sigma+h, t,pho)-DOC_price_Hes_G(S, K, B, r, sigma-h, t,pho)#center
+}
+  return(mean(Vega)/2/h)
+}
+
+
+Theta_price_Hes <- function(S){
+               h<-0.001
+          nb_sim<-500
+          Theta <- c()  
+          for(j in 1:nb_sim){
+          Theta[j] <- DOC_price_Hes_G(S, K, B, r, sigma, t,pho)-DOC_price_Hes_G(S, K, B, r, sigma, t-h,pho)
+}
+  return(mean(Theta)/h)
+}
+
+
+Pho_price_Hes <- function(S){
+             h<-0.0001
+        nb_sim<-500
+          Pho <- c()  
+          for(j in 1:nb_sim){
+          Pho[j] <- DOC_price_Hes_G(S, K, B, r+h, sigma, t,pho)-DOC_price_Hes_G(S, K, B, r-h, sigma, t,pho)#center
+}
+  return(mean(Pho)/2/h)
+}
+
+
+#Calculate Greeks
+Delta_Hes=Delta_price_Hes(S,t)
+Gamma_Hes=Gamma_price_Hes(S)
+Vega_Hes=Vega_price_Hes(S)
+Theta_Hes=Theta_price_Hes(S)
+Pho_Hes=Pho_price_Hes(S)
+
+#Output
+print(paste("Delta: ",Delta_Hes))
+print(paste("Gamma:",Gamma_Hes))
+print(paste("Vega:",Vega_Hes))
+print(paste("Theta:",Theta_Hes))
+print(paste("Pho:",Pho_Hes))
+
+```
+
+
+###3.3.2 Robust Analysis for Delta
+Here comes the robust analysis for Delta in four different time to maturity with h=0.001. 
+```{r}
+#Generate 4 curves
+S_test=20:70
+t_test=c(0.25,0.6,0.75,1)
+Delta_test1=sapply(S_test,Delta_price_Hes,t=t_test[1])
+Delta_test2=sapply(S_test,Delta_price_Hes,t=t_test[2])
+Delta_test3=sapply(S_test,Delta_price_Hes,t=t_test[3])
+Delta_test4=sapply(S_test,Delta_price_Hes,t=t_test[4])
+Delta_test=cbind(Delta_test1,Delta_test2,Delta_test3,Delta_test4)
+
+#Plot
+test_greek <- data.frame(S_test, Delta_test)
+colnames(test_greek) <- c("Stock_price", (1:4)/4)
+test_greek<-gather(test_greek, key =Time_to_maturity, value = Value, -Stock_price)
+test_greek$Time_to_maturity<- as.factor(test_greek$Time_to_maturity)
+test_greek %>% ggplot(aes(x = Stock_price, y = Value, color = Time_to_maturity)) + 
+  geom_line() + theme(text = element_text(size = 13))
+
+```
+
+
+
+If we take h=1 and T=1, we could get the following graph. 
+```{r}
+Delta_price_Hes <- function(S,t){
+               h<-1
+          nb_sim<-500
+          Delta <- c()  
+          for(j in 1:nb_sim){
+          Delta[j] <- DOC_price_Hes_G(S+h, K, B, r, sigma, t,pho)-DOC_price_Hes_G(S-h, K, B, r, sigma, t,pho)#center
+}
+  return(mean(Delta)/2/h)
+}
+
+Delta_test=sapply(S_test,Delta_price_Hes,t=t) 
+test_greek <- data.frame(S_test, Delta_test, "Delta")
+ggplot(test_greek, aes(x = S_test, y = Delta_test)) + geom_line(color='red')
+
+```
